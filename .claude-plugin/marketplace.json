@@ -1,0 +1,5 @@
+{
+  "name": "cache-clock",
+  "owner": { "name": "jorge28mera" },
+  "plugins": [{ "name": "cache-clock", "source": "./" }]
+}
