@@ -141,7 +141,7 @@ test('a handoff writes the brief and starts a fresh chat', async ($, on) => {
   expect(cleared).toBe(1)
 })
 
-test('the line shows plan limits, colours a full one and follows pushed updates', async ($, on) => {
+test('the line shows plan limits as a crab and a heart and follows pushed updates', async ($, on) => {
   const start = Date.parse('2026-11-04T12:00:00Z')
   mock.clock(on, { now: start })
   const toasts: string[] = []
@@ -171,10 +171,10 @@ test('the line shows plan limits, colours a full one and follows pushed updates'
   await $.turn.complete(reply(20_000))
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  const full = await ui.find({ type: 'Text', text: /5h/ })
-  expect(full?.text).toBe('· 5h 92% (resets 42m)')
-  expect(full?.props.color).toBe('#e5534b')
-  expect((await ui.find({ type: 'Text', text: /week/ }))?.text).toBe('· week 3%')
+  const crab = await ui.find({ type: 'Svg' })
+  expect(String(crab?.props.alt)).toBe('5-hour limit: 92% (resets 42m)')
+  expect(await ui.find({ type: 'Text', text: /92%/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /3%/ })).toBeTruthy()
   await ui.unmount()
   expect(toasts).toEqual(["You've used 92% of your 5-hour limit; it resets in 42m."])
 
@@ -185,7 +185,8 @@ test('the line shows plan limits, colours a full one and follows pushed updates'
   })
 
   const later = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await later.find({ type: 'Text', text: /5h/ }))?.text).toBe('· 5h 40% (resets 42m)')
-  expect(await later.find({ type: 'Text', text: /week/ })).toBeFalsy()
+  expect(await later.find({ type: 'Text', text: /▐▛█▜▌/ })).toBeTruthy()
+  expect(await later.find({ type: 'Text', text: /40%/ })).toBeTruthy()
+  expect(await later.find({ type: 'Text', text: /♥/ })).toBeFalsy()
   await later.unmount()
 })

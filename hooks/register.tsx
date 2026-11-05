@@ -18,9 +18,15 @@ const CAP_MS = 2 * 60 * 60 * 1000
 const HOUR = 60 * 60 * 1000
 const WARM = '#e8873c'
 const COLD = '#5aa9e6'
-// A plan limit turns amber, then red, as it fills.
-const AMBER = '#e0a020'
-const RED = '#e5534b'
+// The plan meter's colours: a light Claude crab for the 5-hour limit, a red heart for the week.
+const CRAB_COLOR = '#f5b08f'
+const CRAB_TIRED = '#c99a84'
+const HEART_COLOR = '#e5484d'
+const HEART_TIRED = '#a8474a'
+const SPENT = '#8a8a8a'
+// The used-up part of a meter: a grey shell the colour drains out of.
+const SHELL = '#5e5e5e'
+const INK = '#1c1c1c'
 const LIMIT_NAMES: Record<string, string> = { five_hour: '5h', seven_day: 'week', spend_limit: 'spend' }
 const LIMIT_LONG_NAMES: Record<string, string> = { five_hour: '5-hour', seven_day: 'weekly', spend_limit: 'spend' }
 
@@ -101,7 +107,126 @@ const span = (ms: number): string => {
       : `${m}m`
 }
 
-const limitColor = (pct: number): string | undefined => (pct >= 90 ? RED : pct >= 75 ? AMBER : undefined)
+// How the meter feels as a limit fills: excited, fine, tired, exhausted, then spent at 100%.
+type Mood = 'excited' | 'fine' | 'tired' | 'exhausted' | 'spent'
+
+const moodOf = (pct: number): Mood =>
+  pct >= 100 ? 'spent' : pct >= 75 ? 'exhausted' : pct >= 50 ? 'tired' : pct >= 25 ? 'fine' : 'excited'
+
+// Claude's mascot, as it appears on Claude Code's welcome screen.
+const CRAB = [' ▐▛███▜▌', '▝▜█████▛▘', '  ▘▘ ▝▝']
+
+// Which quarters of a cell each block character fills: top-left, top-right, bottom-left, bottom-right.
+const QUARTERS: Record<string, [boolean, boolean, boolean, boolean]> = {
+  '▘': [true, false, false, false],
+  '▝': [false, true, false, false],
+  '▌': [true, false, true, false],
+  '▐': [false, true, false, true],
+  '▛': [true, true, true, false],
+  '▜': [true, true, false, true],
+  '█': [true, true, true, true],
+}
+
+// The crab as pixels, each quarter 1 wide and 1.5 tall like a terminal cell: 18 by 9.
+const CRAB_RECTS = CRAB.flatMap((line, row) =>
+  [...line].flatMap((char, col) =>
+    (QUARTERS[char] ?? []).flatMap((isOn, q) =>
+      isOn ? [`<rect x="${col * 2 + (q % 2)}" y="${row * 3 + Math.floor(q / 2) * 1.5}" width="1" height="1.5"/>`] : [],
+    ),
+  ),
+).join('')
+
+// Where the crab's two eyes sit (the gaps in ▛ and ▜).
+const EYES = [5, 12]
+
+// A pixel heart, 7 by 6.
+const HEART_RECTS = ['.XX.XX.', 'XXXXXXX', 'XXXXXXX', '.XXXXX.', '..XXX..', '...X...']
+  .flatMap((line, y) => [...line].flatMap((cell, x) => (cell === 'X' ? [`<rect x="${x}" y="${y}" width="1" height="1"/>`] : [])))
+  .join('')
+
+const rect = (x: number, y: number, w: number, ht: number, fill: string) =>
+  `<rect x="${x}" y="${y}" width="${w}" height="${ht}" fill="${fill}"/>`
+
+// A little four-point sparkle centred on x, y.
+const sparkle = (x: number, y: number) => rect(x - 0.4, y - 1.2, 0.8, 2.4, '#ffd166') + rect(x - 1.2, y - 0.4, 2.4, 0.8, '#ffd166')
+
+// A pixel "z", 2 wide, its top-left at x, y.
+const zee = (x: number, y: number, size: number) =>
+  rect(x, y, 2 * size, 0.5 * size, '#b0b0b0') + rect(x + 0.75 * size, y + 0.5 * size, 0.5 * size, 0.5 * size, '#b0b0b0') + rect(x, y + size, 2 * size, 0.5 * size, '#b0b0b0')
+
+// A shape drawn faint, then solid below the line it has drained to: the more used, the lower the fill.
+const drained = (shape: string, color: string, pct: number, top: number, height: number, width: number) => {
+  const level = top + height * Math.min(1, Math.max(0, pct / 100))
+
+  return (
+    `<defs><clipPath id="left"><rect x="-4" y="${level}" width="${width + 8}" height="${height + 4}"/></clipPath></defs>` +
+    `<g fill="${SHELL}">${shape}</g>` +
+    `<g fill="${color}" clip-path="url(#left)">${shape}</g>`
+  )
+}
+
+// The 5-hour meter: the crab drains from the top and gets wearier, spent with X eyes at 100%.
+const crabMeterSvg = (pct: number): string => {
+  const mood = moodOf(pct)
+  const color = mood === 'spent' ? SPENT : mood === 'exhausted' ? CRAB_TIRED : CRAB_COLOR
+  const eyes = EYES.map(x =>
+    mood === 'excited' || mood === 'fine'
+      ? rect(x, 1.5, 1, 1.5, INK)
+      : mood === 'tired'
+        ? rect(x, 1.5, 1, 0.75, color) + rect(x, 2.25, 1, 0.75, INK)
+        : mood === 'exhausted'
+          ? rect(x, 1.5, 1, 1.5, color) + rect(x - 0.2, 2.5, 1.4, 0.4, INK)
+          : `<path d="M${x - 0.3} 1.4L${x + 1.3} 3.1M${x + 1.3} 1.4L${x - 0.3} 3.1" stroke="${INK}" stroke-width="0.45"/>`,
+  ).join('')
+  const extras =
+    mood === 'excited'
+      ? sparkle(-1.5, 0) + sparkle(19.5, 1)
+      : mood === 'tired'
+        ? rect(17.4, -1, 0.6, 0.6, '#7cc4ff') + rect(17, -0.4, 1.4, 1.6, '#7cc4ff')
+        : mood === 'exhausted'
+          ? zee(17.5, -3, 1.2)
+          : mood === 'spent'
+            ? zee(16.5, -2.5, 1.2) + zee(19.5, -4.8, 0.9)
+            : ''
+
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-3.5 -5 26 14.5" shape-rendering="crispEdges">` +
+    drained(CRAB_RECTS, color, pct, 0, 9, 18) +
+    eyes +
+    extras +
+    `</svg>`
+  )
+}
+
+// The weekly meter: a red heart that drains the same way, grey and cracked at 100%.
+const heartMeterSvg = (pct: number): string => {
+  const mood = moodOf(pct)
+  const color = mood === 'spent' ? SPENT : mood === 'exhausted' ? HEART_TIRED : HEART_COLOR
+  const extras =
+    mood === 'excited'
+      ? rect(1, 1, 1, 1, '#ffffff') + sparkle(7.6, -0.2)
+      : mood === 'spent'
+          ? `<path d="M3.6 0.6L3 2.2L4 3.4L3.4 5.4" fill="none" stroke="${INK}" stroke-width="0.4"/>`
+          : ''
+
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1.5 -1.8 10 8.6" shape-rendering="crispEdges">` +
+    drained(HEART_RECTS, color, pct, 0, 6, 7) +
+    extras +
+    `</svg>`
+  )
+}
+
+// The terminal has no SVG: a tinted mini crab and a heart, outlined once spent.
+const meterGlyph = (kind: string, pct: number): { glyph: string; color: string } => {
+  const mood = moodOf(pct)
+  const isHeart = kind !== 'five_hour'
+
+  return {
+    glyph: isHeart ? (mood === 'spent' ? '♡' : '♥') : mood === 'spent' ? '▐x█x▌' : '▐▛█▜▌',
+    color: mood === 'spent' ? SPENT : isHeart ? (mood === 'exhausted' ? HEART_TIRED : HEART_COLOR) : mood === 'exhausted' ? CRAB_TIRED : CRAB_COLOR,
+  }
+}
 
 // One plan limit in words: "5h 4% (resets 42m)". The weekly reset only shows once it is getting full.
 const limitText = (limit: Limit, at: number): string => {
@@ -442,16 +567,42 @@ export const register: Register = on => {
     const plan = await read($, limits)
     const { Box, Text, Button } = $.ui.resolve(e)
 
-    // The plan limits, each in its own colour as it fills.
-    const meter = plan.map(limit => {
-      const color = limitColor(limit.percentUsed)
+    // The plan limits as a crab (5 hours) and a heart (the week) that drain as they fill.
+    const ui = $.ui.resolve(e)
+    // The terminal's table names Svg but draws it as nothing, so it gets text glyphs.
+    const Svg = e.surface !== 'terminal' && 'Svg' in ui ? ui.Svg : null
+    const meter = plan.length === 0 ? null : (
+      <Box key="meter" flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+        {plan.map(limit => {
+          const pct = Math.round(limit.percentUsed)
+          const isCrab = limit.kind === 'five_hour'
+          const alt = `${LIMIT_LONG_NAMES[limit.kind] ?? limit.kind} limit: ${limitText(limit, at).replace(/^\S+ /, '')}`
 
-      return (
-        <Text key={`limit-${limit.kind}`} color={color} dimColor={color === undefined}>
-          {`· ${limitText(limit, at)}`}
-        </Text>
-      )
-    })
+          if (Svg) {
+            return (
+              <Box key={`limit-${limit.kind}`} flexDirection="row" alignItems="center" flexShrink={0}>
+                <Svg
+                  source={isCrab ? crabMeterSvg(limit.percentUsed) : heartMeterSvg(limit.percentUsed)}
+                  alt={alt}
+                  width={isCrab ? 40 : 24}
+                  height={22}
+                />
+                <Text dimColor>{` ${pct}%`}</Text>
+              </Box>
+            )
+          }
+
+          const { glyph, color } = meterGlyph(limit.kind, limit.percentUsed)
+
+          return (
+            <Box key={`limit-${limit.kind}`} flexDirection="row" flexShrink={0}>
+              <Text color={color}>{glyph}</Text>
+              <Text dimColor>{` ${pct}%`}</Text>
+            </Box>
+          )
+        })}
+      </Box>
+    )
 
     const handOff = (
       <Button
@@ -463,7 +614,9 @@ export const register: Register = on => {
 
     const line = isCold ? (
       <Box flexDirection="row" alignItems="center" gap={1}>
-        <Text color={COLD}>❄ Cold</Text>
+        <Box flexShrink={0}>
+          <Text color={COLD}>❄ Cold</Text>
+        </Box>
         <Text dimColor>
           · your next message re-reads {kilo(current.tokens)} tokens (~{money(coldCost(current, run.ttl))})
         </Text>
@@ -472,7 +625,9 @@ export const register: Register = on => {
       </Box>
     ) : (
       <Box flexDirection="row" alignItems="center" gap={1}>
-        <Text color={WARM}>◔ Warm</Text>
+        <Box flexShrink={0}>
+          <Text color={WARM}>◔ Warm</Text>
+        </Box>
         <Text dimColor>
           · cold in {clock(left)} · {kilo(current.tokens)} tokens
           {kw.mode === 'off'
