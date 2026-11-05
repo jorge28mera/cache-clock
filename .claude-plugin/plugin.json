@@ -1,6 +1,6 @@
 {
   "name": "cache-clock",
-  "version": "0.1.0",
-  "description": "A countdown until the chat's prompt cache goes cold, keep-warm pings for big chats, and a handoff to a fresh chat with a detailed brief",
+  "version": "0.2.0",
+  "description": "A countdown until the chat's prompt cache goes cold, keep-warm pings for big chats, a handoff to a fresh chat with a detailed brief, and a plan usage meter",
   "types": "./types/index.d.ts"
 }

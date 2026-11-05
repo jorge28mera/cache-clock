@@ -6,12 +6,16 @@ export type KeepWarm = { mode: 'off' | 'auto' | 'on'; until: number; pings: numb
 
 export type Handoff = 'idle' | 'writing' | 'failed'
 
+// One plan limit as the last reply reported it: five_hour, seven_day, or a gateway's spend_limit.
+export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
+
 declare module 'claude-code' {
   interface PluginState {
     'cache-clock': {
       chat: Shaped<Chat | null>
       keepWarm: Shaped<KeepWarm>
       handoff: Handoff
+      limits: Shaped<Limit[]>
       now: number
     }
   }

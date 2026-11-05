@@ -1,12 +1,13 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, TurnUsage } from 'claude-code'
+import type { EngineInterface, Register, SessionRateLimit, TurnUsage } from 'claude-code'
 
-import type { Chat, Handoff, KeepWarm } from '../types'
+import type { Chat, Handoff, KeepWarm, Limit } from '../types'
 
 const chat = atom({ plugin: 'cache-clock', key: 'chat' } as const, null, { shape: 'chat-1' })
 const keepWarm = atom({ plugin: 'cache-clock', key: 'keepWarm' } as const, { mode: 'off', until: 0, pings: 0 }, { shape: 'keep-warm-1' })
 const handoff = atom({ plugin: 'cache-clock', key: 'handoff' } as const, 'idle')
 const now = atom({ plugin: 'cache-clock', key: 'now' } as const, 0)
+const limits = atom({ plugin: 'cache-clock', key: 'limits' } as const, [], { shape: 'limits-1' })
 
 // A chat this big turns keep-warm on by itself: a cold restart costs far more than a few pings.
 const AUTO_TOKENS = 100_000
@@ -17,6 +18,11 @@ const CAP_MS = 2 * 60 * 60 * 1000
 const HOUR = 60 * 60 * 1000
 const WARM = '#e8873c'
 const COLD = '#5aa9e6'
+// A plan limit turns amber, then red, as it fills.
+const AMBER = '#e0a020'
+const RED = '#e5534b'
+const LIMIT_NAMES: Record<string, string> = { five_hour: '5h', seven_day: 'week', spend_limit: 'spend' }
+const LIMIT_LONG_NAMES: Record<string, string> = { five_hour: '5-hour', seven_day: 'weekly', spend_limit: 'spend' }
 
 const PING_PROMPT = 'Keep-warm ping from the cache-clock mod, not a request. Reply with just: ok'
 
@@ -84,6 +90,28 @@ const timeOfDay = (at: number): string => {
   return `${hour}:${String(d.getMinutes()).padStart(2, '0')}${d.getHours() < 12 ? 'am' : 'pm'}`
 }
 
+// How long until a reset: 42m, 3h 12m, 5d 13h.
+const span = (ms: number): string => {
+  const m = Math.max(0, Math.round(ms / 60_000))
+
+  return m >= 1440
+    ? `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`
+    : m >= 60
+      ? `${Math.floor(m / 60)}h ${m % 60}m`
+      : `${m}m`
+}
+
+const limitColor = (pct: number): string | undefined => (pct >= 90 ? RED : pct >= 75 ? AMBER : undefined)
+
+// One plan limit in words: "5h 4% (resets 42m)". The weekly reset only shows once it is getting full.
+const limitText = (limit: Limit, at: number): string => {
+  const name = LIMIT_NAMES[limit.kind] ?? limit.kind
+  const resetsIn = limit.resetsAt === undefined ? null : Date.parse(limit.resetsAt) - at
+  const showsReset = resetsIn !== null && resetsIn > 0 && (limit.kind === 'five_hour' || limit.percentUsed >= 75)
+
+  return `${name} ${Math.round(limit.percentUsed)}%${showsReset ? ` (resets ${span(resetsIn)})` : ''}`
+}
+
 const stamp = (at: number): string => {
   const d = new Date(at)
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -100,6 +128,28 @@ const run = {
   isTicking: false,
   // The brief waiting for the fresh chat a handoff's /clear opens.
   pendingBrief: null as string | null,
+  // Limits already warned about at 90%, by kind and reset time, so each window warns once.
+  warned: new Set<string>(),
+}
+
+// Keeps the plan limits the engine reported, and warns once when one passes 90%.
+const recordLimits = async ($: EngineInterface, reported: SessionRateLimit[]) => {
+  const next: Limit[] = reported.map(({ kind, percentUsed, resetsAt }) => ({ kind, percentUsed, resetsAt }))
+  await update($, limits, () => next)
+
+  const at = await $.clock.now()
+
+  for (const limit of next) {
+    const id = `${limit.kind}@${limit.resetsAt ?? ''}`
+
+    if (limit.percentUsed >= 90 && !run.warned.has(id)) {
+      run.warned.add(id)
+      const resetsIn = limit.resetsAt === undefined ? 0 : Date.parse(limit.resetsAt) - at
+      $.ui.toast(
+        `You've used ${Math.round(limit.percentUsed)}% of your ${LIMIT_LONG_NAMES[limit.kind] ?? limit.kind} limit${resetsIn > 0 ? `; it resets in ${span(resetsIn)}` : ''}.`,
+      )
+    }
+  }
 }
 
 // Learns the cache's lifetime and starts the one-second clock, once, at the first reply.
@@ -126,7 +176,12 @@ const recordReply = async ($: EngineInterface, used: TurnUsage | undefined) => {
     used === undefined
       ? 0
       : used.input_tokens + used.cache_read_input_tokens + used.cache_creation_input_tokens + used.output_tokens
-  const tokens = (await $.session.usage().then(usage => usage.context.tokens, () => undefined)) ?? fromStep
+  const usage = await $.session.usage().catch(() => undefined)
+  const tokens = usage?.context.tokens ?? fromStep
+
+  if (usage !== undefined) {
+    await recordLimits($, usage.rateLimits)
+  }
 
   await update($, chat, () => ({ warmAt: at, tokens, model }))
   await update($, now, () => at)
@@ -159,7 +214,11 @@ const describe = async ($: EngineInterface): Promise<string> => {
       ? 'Keep-warm is off.'
       : `Keep-warm is on${kw.mode === 'auto' ? ' (big chat)' : ''} until ${timeOfDay(kw.until)}, ${kw.pings} ping${kw.pings === 1 ? '' : 's'} so far.`
 
-  return `${warmth} ${size}. ${warming}`
+  const plan = await read($, limits)
+  const at = await $.clock.now()
+  const planText = plan.length === 0 ? '' : ` Plan: ${plan.map(limit => limitText(limit, at)).join(', ')}.`
+
+  return `${warmth} ${size}. ${warming}${planText}`
 }
 
 // Pings ahead of the cache running out, more lead for the longer cache.
@@ -341,6 +400,15 @@ export const register: Register = on => {
   })
 
 
+  // The engine pushes the plan limits when one moves a whole point, between replies too.
+  on('session.measure', async ($, e, next) => {
+    if (e.changed.includes('rateLimits')) {
+      await recordLimits($, e.rateLimits)
+    }
+
+    return next(e)
+  })
+
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') {
       run.isTurnRunning = false
@@ -371,7 +439,19 @@ export const register: Register = on => {
     const left = current.warmAt + run.ttl - at
     const isCold = left <= 0
     const isLong = current.tokens >= LONG_TOKENS
+    const plan = await read($, limits)
     const { Box, Text, Button } = $.ui.resolve(e)
+
+    // The plan limits, each in its own colour as it fills.
+    const meter = plan.map(limit => {
+      const color = limitColor(limit.percentUsed)
+
+      return (
+        <Text key={`limit-${limit.kind}`} color={color} dimColor={color === undefined}>
+          {`· ${limitText(limit, at)}`}
+        </Text>
+      )
+    })
 
     const handOff = (
       <Button
@@ -387,6 +467,7 @@ export const register: Register = on => {
         <Text dimColor>
           · your next message re-reads {kilo(current.tokens)} tokens (~{money(coldCost(current, run.ttl))})
         </Text>
+        {meter}
         {handOff}
       </Box>
     ) : (
@@ -399,6 +480,7 @@ export const register: Register = on => {
             : ` · keep-warm on${kw.mode === 'auto' ? ' (big chat)' : ''} until ${timeOfDay(kw.until)}${kw.pings > 0 ? ` · ${kw.pings} ping${kw.pings === 1 ? '' : 's'}` : ''}`}
           {isLong ? ' · long chat, answers may slip' : ''}
         </Text>
+        {meter}
         {kw.mode === 'off' ? (
           <Button
             key="warm"

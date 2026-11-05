@@ -140,3 +140,52 @@ test('a handoff writes the brief and starts a fresh chat', async ($, on) => {
 
   expect(cleared).toBe(1)
 })
+
+test('the line shows plan limits, colours a full one and follows pushed updates', async ($, on) => {
+  const start = Date.parse('2026-11-04T12:00:00Z')
+  mock.clock(on, { now: start })
+  const toasts: string[] = []
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('ui.toast', (_, e) => {
+    toasts.push(String(e.text))
+    return { value: undefined }
+  })
+  on('turn.complete', () => ({ text: 'Done.' }))
+  on('session.identity', () => ({ value: { kind: 'claude.ai', isVerified: true } }))
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.usage', () => ({
+    value: {
+      startedAt: 0,
+      context: { tokens: 20_000, window: 1_000_000 },
+      rateLimits: [
+        { kind: 'five_hour', percentUsed: 92, resetsAt: '2026-11-04T12:42:00Z' },
+        { kind: 'seven_day', percentUsed: 3, resetsAt: '2026-11-10T17:00:00Z' },
+      ],
+    },
+  }))
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+
+  await $.turn.complete(reply(20_000))
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const full = await ui.find({ type: 'Text', text: /5h/ })
+  expect(full?.text).toBe('· 5h 92% (resets 42m)')
+  expect(full?.props.color).toBe('#e5534b')
+  expect((await ui.find({ type: 'Text', text: /week/ }))?.text).toBe('· week 3%')
+  await ui.unmount()
+  expect(toasts).toEqual(["You've used 92% of your 5-hour limit; it resets in 42m."])
+
+  await $.session.measure({
+    context: { tokens: 20_000, window: 1_000_000 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 40, resetsAt: '2026-11-04T12:42:00Z' }],
+    changed: ['rateLimits'],
+  })
+
+  const later = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await later.find({ type: 'Text', text: /5h/ }))?.text).toBe('· 5h 40% (resets 42m)')
+  expect(await later.find({ type: 'Text', text: /week/ })).toBeFalsy()
+  await later.unmount()
+})
